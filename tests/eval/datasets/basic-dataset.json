@@ -1,0 +1,25 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "setup_character",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "I want to start a session as a netrunner named Jax."}]
+      }
+    },
+    {
+      "eval_case_id": "hack_terminal",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "I try to bypass the security lock on the corporate mainframe using my Interface skill."}]
+      }
+    },
+    {
+      "eval_case_id": "combat_encounter",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "Draw my smart pistol and shoot the security patrol drone."}]
+      }
+    }
+  ]
+}
