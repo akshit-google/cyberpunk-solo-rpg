@@ -1,4 +1,12 @@
-from app.tools import roll_dice, get_character_sheet, update_character_sheet, add_journal_entry
+from app.tools import (
+    roll_dice, 
+    get_character_sheet, 
+    update_character_sheet, 
+    add_journal_entry,
+    DiceFormulaInput,
+    CharacterUpdateInput,
+    JournalEntryInput
+)
 
 class MockToolContext:
     def __init__(self, state=None):
@@ -7,7 +15,7 @@ class MockToolContext:
 
 def test_roll_dice_valid() -> None:
     # Test flat rolls
-    res = roll_dice("1d10")
+    res = roll_dice(DiceFormulaInput(formula="1d10"))
     assert res["status"] == "success"
     assert len(res["rolls"]) == 1
     assert 1 <= res["rolls"][0] <= 10
@@ -15,7 +23,7 @@ def test_roll_dice_valid() -> None:
     assert res["total"] == res["rolls"][0]
 
     # Test multiple dice
-    res = roll_dice("3d6")
+    res = roll_dice(DiceFormulaInput(formula="3d6"))
     assert res["status"] == "success"
     assert len(res["rolls"]) == 3
     assert all(1 <= d <= 6 for d in res["rolls"])
@@ -23,20 +31,20 @@ def test_roll_dice_valid() -> None:
     assert res["total"] == sum(res["rolls"])
 
     # Test modifier addition
-    res = roll_dice("1d10+4")
+    res = roll_dice(DiceFormulaInput(formula="1d10+4"))
     assert res["status"] == "success"
     assert res["modifier"] == 4
     assert res["total"] == res["rolls"][0] + 4
 
     # Test modifier subtraction
-    res = roll_dice("2d6-2")
+    res = roll_dice(DiceFormulaInput(formula="2d6-2"))
     assert res["status"] == "success"
     assert res["modifier"] == -2
     assert res["total"] == sum(res["rolls"]) - 2
 
 
 def test_roll_dice_invalid() -> None:
-    res = roll_dice("invalid")
+    res = roll_dice(DiceFormulaInput(formula="invalid"))
     assert res["status"] == "error"
     assert "Invalid dice formula" in res["message"]
 
@@ -63,26 +71,26 @@ def test_character_sheet_operations() -> None:
     assert sheet["credits"] == 500
 
     # Test update_character_sheet: flat update (credits and HP)
-    update_res = update_character_sheet({"hp": 25, "credits": 450}, context)
+    update_res = update_character_sheet(CharacterUpdateInput(hp=25, credits=450), context)
     assert update_res["status"] == "success"
     assert context.state["character_sheet"]["hp"] == 25
     assert context.state["character_sheet"]["credits"] == 450
 
     # Test update_character_sheet: inventory add
-    update_character_sheet({"inventory_add": "Cyberdeck"}, context)
+    update_character_sheet(CharacterUpdateInput(inventory_add=["Cyberdeck"]), context)
     assert "Cyberdeck" in context.state["character_sheet"]["inventory"]
 
     # Test update_character_sheet: inventory remove
-    update_character_sheet({"inventory_remove": "Neural Link"}, context)
+    update_character_sheet(CharacterUpdateInput(inventory_remove=["Neural Link"]), context)
     assert "Neural Link" not in context.state["character_sheet"]["inventory"]
 
     # Test update_character_sheet: nested update (skills)
-    update_character_sheet({"skills": {"interface": 5, "handgun": 1}}, context)
+    update_character_sheet(CharacterUpdateInput(skills={"interface": 5, "handgun": 1}), context)
     assert context.state["character_sheet"]["skills"]["interface"] == 5
     assert context.state["character_sheet"]["skills"]["handgun"] == 1
 
     # Test add_journal_entry
-    journal_res = add_journal_entry("Bypassed corporate door.", context)
+    journal_res = add_journal_entry(JournalEntryInput(entry="Bypassed corporate door."), context)
     assert journal_res["status"] == "success"
     assert "Bypassed corporate door." in context.state["character_sheet"]["journal"]
     assert len(context.state["character_sheet"]["journal"]) == 2

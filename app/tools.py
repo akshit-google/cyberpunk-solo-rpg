@@ -1,17 +1,41 @@
 import random
 import re
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
 from google.adk.tools import ToolContext
 
-def roll_dice(formula: str) -> dict:
+# Define schemas for tool inputs and outputs
+class DiceFormulaInput(BaseModel):
+    formula: str = Field(..., description="The dice roll formula string, such as '1d10', '2d6', or '1d10+3'")
+
+class CharacterUpdateInput(BaseModel):
+    hp: Optional[int] = Field(None, description="New HP value to set directly, e.g. 25")
+    credits: Optional[int] = Field(None, description="New credits value to set directly, e.g. 450")
+    inventory_add: Optional[List[str]] = Field(None, description="List of items to add to inventory")
+    inventory_remove: Optional[List[str]] = Field(None, description="List of items to remove from inventory")
+    skills: Optional[Dict[str, int]] = Field(None, description="Skills to update, mapping skill name to new rank")
+    stats: Optional[Dict[str, int]] = Field(None, description="Stats to update, mapping stat name to new value")
+
+class JournalEntryInput(BaseModel):
+    entry: str = Field(..., description="A short string summarizing the latest event or result (e.g. 'Bypassed lock.')")
+
+class ToolResponse(BaseModel):
+    status: str = Field(..., description="Status of the operation, 'success' or 'error'")
+    message: Optional[str] = Field(None, description="Detailed message describing the result")
+    data: Optional[Dict[str, Any]] = Field(None, description="Payload data resulting from the tool operation")
+
+
+def roll_dice(args: DiceFormulaInput) -> dict:
     """Rolls dice based on a formula (e.g. '1d10', '2d6', '1d10+4', '2d6-1').
 
     Args:
-        formula: The dice roll formula string, such as '1d10', '2d6', or '1d10+3'.
+        args: The dice roll input arguments containing the formula.
 
     Returns:
         A dictionary containing 'rolls' (list of individual die values), 
         'modifier' (the flat plus/minus value), and 'total' (the final sum).
     """
+    formula = args.formula
     # Normalize formula by removing spaces
     normalized = formula.replace(" ", "")
     match = re.match(r'^(\d+)d(\d+)(?:([+-])(\d+))?$', normalized)
@@ -47,12 +71,12 @@ def get_character_sheet(tool_context: ToolContext) -> dict:
     return tool_context.state.get("character_sheet", {})
 
 
-def update_character_sheet(updates: dict, tool_context: ToolContext) -> dict:
+def update_character_sheet(updates: CharacterUpdateInput, tool_context: ToolContext) -> dict:
     """Updates the character sheet with new values.
 
     Args:
-        updates: A dictionary of key-value pairs to update on the character sheet.
-                 Example: {"hp": 25, "credits": 450, "inventory_add": "Cyberdeck", "inventory_remove": "Credkey"}
+        updates: The character update parameters.
+        tool_context: The execution context for the tool (injected automatically).
 
     Returns:
         A dictionary containing the updated character sheet.
@@ -61,36 +85,36 @@ def update_character_sheet(updates: dict, tool_context: ToolContext) -> dict:
     if not sheet:
         return {"status": "error", "message": "No character sheet initialized."}
     
-    for key, value in updates.items():
-        if key == "inventory_add":
-            if isinstance(value, list):
-                sheet["inventory"].extend([str(v) for v in value])
-            else:
-                sheet["inventory"].append(str(value))
-        elif key == "inventory_remove":
-            if isinstance(value, list):
-                for item in value:
-                    if str(item) in sheet["inventory"]:
-                        sheet["inventory"].remove(str(item))
-            else:
-                if str(value) in sheet["inventory"]:
-                    sheet["inventory"].remove(str(value))
-        elif key in sheet:
-            if isinstance(sheet[key], dict) and isinstance(value, dict):
-                # Update nested dicts (like stats or skills)
-                sheet[key].update(value)
-            else:
-                sheet[key] = value
+    if updates.hp is not None:
+        sheet["hp"] = updates.hp
+    if updates.credits is not None:
+        sheet["credits"] = updates.credits
+    if updates.inventory_add is not None:
+        for item in updates.inventory_add:
+            sheet["inventory"].append(str(item))
+    if updates.inventory_remove is not None:
+        for item in updates.inventory_remove:
+            if str(item) in sheet["inventory"]:
+                sheet["inventory"].remove(str(item))
+    if updates.skills is not None:
+        if "skills" not in sheet:
+            sheet["skills"] = {}
+        sheet["skills"].update(updates.skills)
+    if updates.stats is not None:
+        if "stats" not in sheet:
+            sheet["stats"] = {}
+        sheet["stats"].update(updates.stats)
                 
     tool_context.state["character_sheet"] = sheet
     return {"status": "success", "character_sheet": sheet}
 
 
-def add_journal_entry(entry: str, tool_context: ToolContext) -> dict:
+def add_journal_entry(entry_arg: JournalEntryInput, tool_context: ToolContext) -> dict:
     """Appends a new summary entry to the campaign journal log.
 
     Args:
-        entry: A short string summarizing the latest event or result (e.g. 'Successfully hacked corporate lock. Obtained datapad.').
+        entry_arg: The journal entry content.
+        tool_context: The execution context for the tool (injected automatically).
 
     Returns:
         A dictionary confirming the entry has been added.
@@ -98,6 +122,6 @@ def add_journal_entry(entry: str, tool_context: ToolContext) -> dict:
     sheet = tool_context.state.get("character_sheet", {})
     if "journal" not in sheet:
         sheet["journal"] = []
-    sheet["journal"].append(entry)
+    sheet["journal"].append(entry_arg.entry)
     tool_context.state["character_sheet"] = sheet
     return {"status": "success", "journal": sheet["journal"]}

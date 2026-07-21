@@ -1,15 +1,38 @@
-from typing import AsyncGenerator
+import re
+import logging
+import asyncio
+from typing import AsyncGenerator, Optional
+
 from google.adk.agents import Agent, BaseAgent
 from google.adk.apps import App
 from google.adk.models import Gemini
 from google.adk.events import Event
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.tools import FunctionTool
+from google.adk.plugins.base_plugin import BasePlugin
+from google.adk.apps.app import EventsCompactionConfig
+from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
 
-from app.tools import roll_dice, get_character_sheet, update_character_sheet, add_journal_entry
+from app.tools import (
+    roll_dice, 
+    get_character_sheet, 
+    update_character_sheet, 
+    add_journal_entry,
+    DiceFormulaInput,
+    CharacterUpdateInput,
+    JournalEntryInput
+)
 
-# Initialize player character sheet in session state if not already done
+# Set up local logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("rpg_engine")
+
+
+# --- 1. CALLBACKS: State Initialization & Async Memory Consolidation ---
+
 async def init_state(callback_context: CallbackContext) -> None:
+    """Initializes player character sheet in session state if not already done."""
     if "character_sheet" not in callback_context.state:
         callback_context.state["character_sheet"] = {
             "name": "Jax",
@@ -35,6 +58,81 @@ async def init_state(callback_context: CallbackContext) -> None:
     if "rules_report" not in callback_context.state:
         callback_context.state["rules_report"] = "No actions occurred yet."
 
+
+async def run_memory_consolidation(callback_context: CallbackContext) -> None:
+    """Performs background memory consolidation asynchronously."""
+    try:
+        await asyncio.sleep(0.5)  # Non-blocking simulation of background work
+        sheet = callback_context.state.get("character_sheet", {})
+        if sheet and "journal" in sheet:
+            entries = sheet["journal"]
+            logger.info(f"[ASYNC MEMORY CONSOLIDATION] Consolidating {len(entries)} journal entries in background.")
+            # In a production app, we would write these to a persistent SQLite/Cloud SQL db or file here
+    except Exception as e:
+        logger.error(f"Error in background memory consolidation: {e}")
+
+
+async def after_agent_consolidate(callback_context: CallbackContext) -> None:
+    """Triggers background memory task without blocking the final user response."""
+    asyncio.create_task(run_memory_consolidation(callback_context))
+    return None
+
+
+# --- 2. OBSERVABILITY: Intent vs Outcome Logging Callbacks ---
+
+async def before_tool_log(tool, args, tool_context) -> None:
+    """Explicitly logs the intent before executing a tool."""
+    logger.info(f"[INTENT LOG] Intending to invoke tool '{tool.name}' with arguments: {args}")
+    return None
+
+async def after_tool_log(tool, args, tool_context, tool_response) -> None:
+    """Explicitly logs the final outcome after a tool completes."""
+    logger.info(f"[OUTCOME LOG] Tool '{tool.name}' completed execution. Response payload: {tool_response}")
+    return None
+
+
+# --- 3. HUMAN-IN-THE-LOOP: High-Stakes Confirmation Hook ---
+
+def needs_approval(updates: CharacterUpdateInput, **kwargs) -> bool:
+    """Evaluates whether an update requires explicit human-in-the-loop approval.
+    
+    Returns True for life-threatening damage (HP <= 0) or huge credit spending (credits <= 100).
+    """
+    if updates.hp is not None and updates.hp <= 0:
+        logger.warning("[HITL TRIGGER] High-stakes action: Player is at risk of dying!")
+        return True
+    if updates.credits is not None and updates.credits <= 100:
+        logger.warning("[HITL TRIGGER] High-stakes action: Large monetary spending!")
+        return True
+    return False
+
+# Wrap update_character_sheet tool with approval hook
+update_character_tool = FunctionTool(
+    update_character_sheet, 
+    require_confirmation=needs_approval
+)
+
+
+# --- 4. POLICY PLUGINS: PII Redaction Guardrails ---
+
+class RPGPolicyPlugin(BasePlugin):
+    """Custom runtime policy plugin enforcing PII redaction before invoking models."""
+    async def before_model_callback(self, *, callback_context, llm_request):
+        if llm_request.contents:
+            for content in llm_request.contents:
+                if content.parts:
+                    for part in content.parts:
+                        if part.text:
+                            # Redact email addresses
+                            email_pattern = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
+                            part.text = re.sub(email_pattern, "[REDACTED_EMAIL]", part.text)
+                            # Redact phone numbers
+                            phone_pattern = r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'
+                            part.text = re.sub(phone_pattern, "[REDACTED_PHONE]", part.text)
+        return None
+
+
+# --- 5. AGENT DEFINITIONS & STRATEGIC MODEL ROUTING ---
 
 def create_rules_agent() -> Agent:
     instruction = """You are the mechanical Rules & Combat Engine (The Arbiter) of a Cyberpunk Solo RPG set in Neo-Chicago 2099.
@@ -64,11 +162,14 @@ Roll: 1d10 (8) + TECH (8) + Interface (4) = 20 (Success).
 State Changes: Added 'Project Files' to inventory.
 Journal Log: Jax bypassed door lock to enter security room.
 """
+    # Strategic Routing: Flash model for low-latency logic processing and fast tool-calling
     return Agent(
         name="rules_agent",
         model=Gemini(model="gemini-flash-latest"),
         instruction=instruction,
-        tools=[roll_dice, get_character_sheet, update_character_sheet, add_journal_entry],
+        tools=[roll_dice, get_character_sheet, update_character_tool, add_journal_entry],
+        before_tool_callback=before_tool_log,
+        after_tool_callback=after_tool_log,
     )
 
 
@@ -90,22 +191,22 @@ Guidelines:
 4. Refer to the character sheet state if you need to mention Jax's specific gear or status.
 5. Always end your turn by asking the player: 'What do you do?' or giving them a few thematic choices.
 """
+    # Strategic Routing: Pro model for high-quality, creative, multi-turn narrative generation
     return Agent(
         name="narrator_agent",
-        model=Gemini(model="gemini-flash-latest"),
+        model=Gemini(model="gemini-1.5-pro"),
         instruction=instruction,
     )
 
 
 class GameCouncilAgent(BaseAgent):
-    # Declare fields for Pydantic validation
     rules_agent: BaseAgent
     narrator_agent: BaseAgent
 
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
-        # 1. Run the rules agent to process rolls, check sheet, log events.
+        # 1. Run the rules agent
         rules_report_text = ""
         async for event in self.rules_agent.run_async(ctx):
             if event.get_function_calls() or event.get_function_responses():
@@ -116,7 +217,7 @@ class GameCouncilAgent(BaseAgent):
         
         ctx.session.state["rules_report"] = rules_report_text or "No mechanical rolls or checks occurred."
 
-        # 2. Run the narrator agent.
+        # 2. Run the narrator agent
         async for event in self.narrator_agent.run_async(ctx):
             yield event
 
@@ -132,9 +233,17 @@ root_agent = GameCouncilAgent(
     narrator_agent=narrator_sub,
     sub_agents=[rules_sub, narrator_sub],
     before_agent_callback=init_state,
+    after_agent_callback=after_agent_consolidate,
 )
 
 app = App(
     root_agent=root_agent,
     name="app",
+    # History Compaction/Context Bloat Management: periodic summary of intermediate conversation events
+    events_compaction_config=EventsCompactionConfig(
+        compaction_interval=15,
+        overlap_size=3,
+        summarizer=LlmEventSummarizer(llm=Gemini(model="gemini-flash-latest")),
+    ),
+    plugins=[RPGPolicyPlugin()],
 )
